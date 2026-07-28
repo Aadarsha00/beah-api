@@ -15,8 +15,29 @@ MAX_ADVANCE_DAYS = 90
 ACTIVE_STATUSES = ("booked", "confirmed")
 
 
+def booking_timezone():
+    """Return the salon timezone, independent of any user/request timezone."""
+    return timezone.get_default_timezone()
+
+
+def booking_now():
+    """Return the current time in the salon timezone."""
+    return timezone.localtime(timezone.now(), booking_timezone())
+
+
+def booking_today():
+    return booking_now().date()
+
+
 def _as_datetime(appointment_date, appointment_time):
     return datetime.combine(appointment_date, appointment_time)
+
+
+def _as_aware_datetime(appointment_date, appointment_time):
+    return timezone.make_aware(
+        _as_datetime(appointment_date, appointment_time),
+        booking_timezone(),
+    )
 
 
 def business_hours(appointment_date):
@@ -25,8 +46,15 @@ def business_hours(appointment_date):
     return OPENING_TIME, CLOSING_TIME
 
 
-def validate_slot(appointment_date, appointment_time, duration_minutes):
-    today = timezone.localdate()
+def validate_slot(
+    appointment_date,
+    appointment_time,
+    duration_minutes,
+    *,
+    current_time=None,
+):
+    current_time = current_time or booking_now()
+    today = current_time.date()
     if appointment_date < today:
         raise serializers.ValidationError(
             {"appointment_date": "Choose today or a future date."}
@@ -64,8 +92,8 @@ def validate_slot(appointment_date, appointment_time, duration_minutes):
             }
         )
 
-    aware_start = timezone.make_aware(start, timezone.get_current_timezone())
-    if aware_start <= timezone.now():
+    aware_start = _as_aware_datetime(appointment_date, appointment_time)
+    if aware_start <= current_time:
         raise serializers.ValidationError(
             {"appointment_time": "Choose a future appointment time."}
         )
@@ -152,6 +180,7 @@ def reschedule_appointment(instance, validated_data):
 
 def available_slots(appointment_date, duration_minutes):
     slots = []
+    current_time = booking_now()
     opening_time, closing_time = business_hours(appointment_date)
     cursor = _as_datetime(appointment_date, opening_time)
     closing = _as_datetime(appointment_date, closing_time)
@@ -159,7 +188,12 @@ def available_slots(appointment_date, duration_minutes):
     while cursor + timedelta(minutes=duration_minutes) <= closing:
         slot_time = cursor.time()
         try:
-            validate_slot(appointment_date, slot_time, duration_minutes)
+            validate_slot(
+                appointment_date,
+                slot_time,
+                duration_minutes,
+                current_time=current_time,
+            )
         except serializers.ValidationError:
             pass
         else:

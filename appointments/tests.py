@@ -1,8 +1,10 @@
-from datetime import time, timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -87,6 +89,106 @@ class AppointmentApiTests(TestCase):
         self.assertNotIn("10:30:00", slot_values)
         self.assertIn("09:30:00", slot_values)
         self.assertNotIn("client_name", response.data)
+
+    @override_settings(TIME_ZONE="America/New_York")
+    def test_same_day_availability_excludes_elapsed_slots_in_salon_timezone(self):
+        # 14:15 UTC is 10:15 AM in Baltimore during daylight-saving time.
+        fixed_now = datetime(2026, 7, 28, 14, 15, tzinfo=ZoneInfo("UTC"))
+        with (
+            patch("django.utils.timezone.now", return_value=fixed_now),
+            # A visitor's active timezone must not change the salon's schedule.
+            timezone.override(ZoneInfo("Asia/Kathmandu")),
+        ):
+            response = self.client.get(
+                "/api/appointments/availability/",
+                {"date": "2026-07-28", "service": self.short_service.pk},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["time_zone"], "America/New_York")
+        slot_values = {slot["value"] for slot in response.data["slots"]}
+        self.assertNotIn("09:00:00", slot_values)
+        self.assertNotIn("09:30:00", slot_values)
+        self.assertNotIn("10:00:00", slot_values)
+        self.assertIn("10:30:00", slot_values)
+
+    @override_settings(TIME_ZONE="America/New_York")
+    def test_direct_booking_rejects_elapsed_same_day_time(self):
+        fixed_now = datetime(2026, 7, 28, 14, 15, tzinfo=ZoneInfo("UTC"))
+        self.client.force_authenticate(self.user)
+
+        with (
+            patch("django.utils.timezone.now", return_value=fixed_now),
+            timezone.override(ZoneInfo("Asia/Kathmandu")),
+        ):
+            response = self.client.post(
+                "/api/appointments/",
+                {
+                    "client_name": "Test Customer",
+                    "client_email": self.user.email,
+                    "client_phone": self.user.phone_number,
+                    "service": self.short_service.pk,
+                    "appointment_date": "2026-07-28",
+                    "appointment_time": "10:00:00",
+                },
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("appointment_time", response.data)
+        self.assertEqual(Appointment.objects.count(), 0)
+
+    @override_settings(TIME_ZONE="America/New_York")
+    def test_direct_booking_accepts_next_future_same_day_slot(self):
+        fixed_now = datetime(2026, 7, 28, 14, 15, tzinfo=ZoneInfo("UTC"))
+        self.client.force_authenticate(self.user)
+
+        with (
+            patch("django.utils.timezone.now", return_value=fixed_now),
+            timezone.override(ZoneInfo("Asia/Kathmandu")),
+        ):
+            response = self.client.post(
+                "/api/appointments/",
+                {
+                    "client_name": "Test Customer",
+                    "client_email": self.user.email,
+                    "client_phone": self.user.phone_number,
+                    "service": self.short_service.pk,
+                    "appointment_date": "2026-07-28",
+                    "appointment_time": "10:30:00",
+                },
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Appointment.objects.count(), 1)
+
+    @override_settings(TIME_ZONE="America/New_York")
+    def test_my_upcoming_excludes_elapsed_same_day_appointments(self):
+        fixed_now = datetime(2026, 7, 28, 14, 15, tzinfo=ZoneInfo("UTC"))
+        past_today = self.appointment(
+            appointment_date=fixed_now.date(),
+            appointment_time=time(10, 0),
+        )
+        future_today = self.appointment(
+            appointment_date=fixed_now.date(),
+            appointment_time=time(10, 30),
+        )
+        future_day = self.appointment(
+            appointment_date=fixed_now.date() + timedelta(days=1),
+            appointment_time=time(9, 0),
+        )
+        self.client.force_authenticate(self.user)
+
+        with (
+            patch("django.utils.timezone.now", return_value=fixed_now),
+            timezone.override(ZoneInfo("Asia/Kathmandu")),
+        ):
+            response = self.client.get("/api/appointments/my_upcoming/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        appointment_ids = {item["id"] for item in response.data}
+        self.assertNotIn(past_today.pk, appointment_ids)
+        self.assertIn(future_today.pk, appointment_ids)
+        self.assertIn(future_day.pk, appointment_ids)
 
     def test_overlapping_booking_is_rejected_without_a_stylist(self):
         self.appointment()

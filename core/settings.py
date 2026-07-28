@@ -1,6 +1,8 @@
+import json
 import os
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 from django.core.exceptions import ImproperlyConfigured
 
@@ -8,11 +10,49 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 def env_bool(name, default=False):
-    return os.getenv(name, str(default)).lower() in {"1", "true", "yes", "on"}
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ImproperlyConfigured(
+        f"{name} must be one of true/false, 1/0, yes/no, or on/off."
+    )
 
 
 def env_list(name, default=""):
     return [value.strip() for value in os.getenv(name, default).split(",") if value.strip()]
+
+
+def env_int(name, default):
+    value = os.getenv(name, str(default))
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"{name} must be an integer.") from exc
+
+
+def env_json(name, default=None):
+    value = os.getenv(name)
+    if not value:
+        return {} if default is None else default
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ImproperlyConfigured(f"{name} must contain valid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise ImproperlyConfigured(f"{name} must contain a JSON object.")
+    return parsed
+
+
+def required_env(name):
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise ImproperlyConfigured(f"{name} is required.")
+    return value
 
 
 DEBUG = env_bool("DJANGO_DEBUG", True)
@@ -85,25 +125,38 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "core.wsgi.application"
 
-if os.getenv("DB_ENGINE", "sqlite").lower() == "mysql":
+DB_ENGINE = os.getenv("DB_ENGINE", "sqlite").lower()
+if DB_ENGINE == "mysql":
+    database_options = {
+        "charset": "utf8mb4",
+        "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
+    }
+    database_ssl_ca = os.getenv("DB_SSL_CA", "").strip()
+    if database_ssl_ca:
+        database_options["ssl"] = {"ca": database_ssl_ca}
+
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.mysql",
-            "NAME": os.environ["DB_NAME"],
-            "USER": os.environ["DB_USER"],
-            "PASSWORD": os.environ["DB_PASSWORD"],
+            "NAME": required_env("DB_NAME"),
+            "USER": required_env("DB_USER"),
+            "PASSWORD": required_env("DB_PASSWORD"),
             "HOST": os.getenv("DB_HOST", "localhost"),
             "PORT": os.getenv("DB_PORT", "3306"),
-            "OPTIONS": {"init_command": "SET sql_mode='STRICT_TRANS_TABLES'"},
+            "CONN_MAX_AGE": env_int("DB_CONN_MAX_AGE", 60 if not DEBUG else 0),
+            "CONN_HEALTH_CHECKS": True,
+            "OPTIONS": database_options,
         }
     }
-else:
+elif DB_ENGINE == "sqlite":
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": BASE_DIR / "db.sqlite3",
         }
     }
+else:
+    raise ImproperlyConfigured("DB_ENGINE must be either 'sqlite' or 'mysql'.")
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -118,17 +171,26 @@ TIME_ZONE = os.getenv("DJANGO_TIME_ZONE", "America/New_York")
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = "/static/"
-STATIC_ROOT = BASE_DIR / "staticfiles"
+STATIC_URL = os.getenv("DJANGO_STATIC_URL", "/static/")
+STATIC_ROOT = Path(os.getenv("DJANGO_STATIC_ROOT", BASE_DIR / "staticfiles"))
+
+DEFAULT_STORAGE_BACKEND = os.getenv(
+    "DJANGO_DEFAULT_STORAGE_BACKEND",
+    "django.core.files.storage.FileSystemStorage",
+)
+DEFAULT_STORAGE_OPTIONS = env_json("DJANGO_DEFAULT_STORAGE_OPTIONS")
 STORAGES = {
-    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "default": {"BACKEND": DEFAULT_STORAGE_BACKEND},
     "staticfiles": {
         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"
     },
 }
+if DEFAULT_STORAGE_OPTIONS:
+    STORAGES["default"]["OPTIONS"] = DEFAULT_STORAGE_OPTIONS
 
-MEDIA_URL = "/media/"
-MEDIA_ROOT = BASE_DIR / "media"
+MEDIA_URL = os.getenv("DJANGO_MEDIA_URL", "/media/")
+MEDIA_ROOT_ENV = os.getenv("DJANGO_MEDIA_ROOT", "").strip()
+MEDIA_ROOT = Path(MEDIA_ROOT_ENV) if MEDIA_ROOT_ENV else BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
@@ -147,8 +209,11 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": os.getenv("ANON_THROTTLE_RATE", "100/hour"),
         "user": os.getenv("USER_THROTTLE_RATE", "1000/hour"),
+        "contact": os.getenv("CONTACT_THROTTLE_RATE", "5/hour"),
     },
 }
+if os.getenv("DJANGO_NUM_PROXIES", "").strip():
+    REST_FRAMEWORK["NUM_PROXIES"] = env_int("DJANGO_NUM_PROXIES", 0)
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
@@ -201,21 +266,185 @@ EMAIL_BACKEND = os.getenv(
     "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"
 )
 EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_PORT = env_int("EMAIL_PORT", 587)
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
 EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", True)
 EMAIL_USE_SSL = env_bool("EMAIL_USE_SSL", False)
-EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "15"))
+EMAIL_TIMEOUT = env_int("EMAIL_TIMEOUT", 15)
 DEFAULT_FROM_EMAIL = os.getenv(
     "DEFAULT_FROM_EMAIL", "Beautiful Brows & Henna <no-reply@beautifulbrowsandhenna.com>"
 )
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip()
+SEND_CONTACT_EMAILS = env_bool("SEND_CONTACT_EMAILS", not DEBUG)
 
 SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", not DEBUG)
-SESSION_COOKIE_SECURE = not DEBUG
-CSRF_COOKIE_SECURE = not DEBUG
-SECURE_HSTS_SECONDS = 31536000 if not DEBUG else 0
-SECURE_HSTS_INCLUDE_SUBDOMAINS = not DEBUG
-SECURE_HSTS_PRELOAD = not DEBUG
+SESSION_COOKIE_SECURE = env_bool("SESSION_COOKIE_SECURE", not DEBUG)
+CSRF_COOKIE_SECURE = env_bool("CSRF_COOKIE_SECURE", not DEBUG)
+SECURE_HSTS_SECONDS = env_int("DJANGO_SECURE_HSTS_SECONDS", 0)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool(
+    "DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS", False
+)
+SECURE_HSTS_PRELOAD = env_bool("DJANGO_SECURE_HSTS_PRELOAD", False)
 SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = "same-origin"
 X_FRAME_OPTIONS = "DENY"
+
+USE_X_FORWARDED_HOST = env_bool("DJANGO_USE_X_FORWARDED_HOST", False)
+if env_bool("DJANGO_TRUST_X_FORWARDED_PROTO", False):
+    # Enable only when the application is behind a trusted proxy that strips
+    # client-supplied X-Forwarded-Proto and sets its own value.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+LOG_LEVEL = os.getenv("DJANGO_LOG_LEVEL", "INFO").upper()
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": "{asctime} {levelname} {name} {message}",
+            "style": "{",
+        }
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "standard",
+        }
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": LOG_LEVEL,
+    },
+    "loggers": {
+        "django.security": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+    },
+}
+
+
+def _is_local_origin(value):
+    hostname = urlparse(value).hostname
+    return hostname in {"localhost", "127.0.0.1", "::1"}
+
+
+if not DEBUG:
+    configuration_errors = []
+
+    if (
+        len(SECRET_KEY) < 50
+        or SECRET_KEY.startswith("django-insecure-")
+        or SECRET_KEY == "replace-with-a-long-random-secret"
+    ):
+        configuration_errors.append(
+            "DJANGO_SECRET_KEY must be a long, random production secret."
+        )
+
+    production_hosts = [
+        host
+        for host in ALLOWED_HOSTS
+        if host not in {"localhost", "127.0.0.1", "::1"}
+        and not host.endswith(".example.com")
+    ]
+    if "*" in ALLOWED_HOSTS or not production_hosts:
+        configuration_errors.append(
+            "DJANGO_ALLOWED_HOSTS must contain the real API hostname and must not use '*'."
+        )
+
+    invalid_cors_origins = [
+        origin
+        for origin in CORS_ALLOWED_ORIGINS
+        if urlparse(origin).scheme != "https" and not _is_local_origin(origin)
+    ]
+    production_cors_origins = [
+        origin
+        for origin in CORS_ALLOWED_ORIGINS
+        if not _is_local_origin(origin)
+        and not (urlparse(origin).hostname or "").endswith(".example.com")
+    ]
+    if invalid_cors_origins or not production_cors_origins:
+        configuration_errors.append(
+            "CORS_ALLOWED_ORIGINS must contain the real HTTPS frontend origin."
+        )
+
+    if DB_ENGINE == "sqlite":
+        configuration_errors.append(
+            "Production SQLite is disabled because booking row locks require MySQL. "
+            "Set DB_ENGINE=mysql and configure DB_* values."
+        )
+
+    if (
+        DEFAULT_STORAGE_BACKEND
+        == "django.core.files.storage.FileSystemStorage"
+        and not MEDIA_ROOT_ENV
+    ):
+        configuration_errors.append(
+            "DJANGO_MEDIA_ROOT must explicitly point to durable persistent storage "
+            "when using FileSystemStorage."
+        )
+    elif DEFAULT_STORAGE_BACKEND == "django.core.files.storage.FileSystemStorage":
+        try:
+            MEDIA_ROOT.resolve().relative_to(BASE_DIR.resolve())
+        except ValueError:
+            pass
+        else:
+            configuration_errors.append(
+                "DJANGO_MEDIA_ROOT must be outside the application release directory "
+                "so a code deployment cannot replace uploaded media."
+            )
+
+    unsafe_email_backends = {
+        "django.core.mail.backends.console.EmailBackend",
+        "django.core.mail.backends.locmem.EmailBackend",
+        "django.core.mail.backends.filebased.EmailBackend",
+        "django.core.mail.backends.dummy.EmailBackend",
+    }
+    if DJOSER["SEND_ACTIVATION_EMAIL"] and EMAIL_BACKEND in unsafe_email_backends:
+        configuration_errors.append(
+            "A real email backend is required while activation email is enabled."
+        )
+    if (
+        EMAIL_BACKEND == "django.core.mail.backends.smtp.EmailBackend"
+        and (
+            not EMAIL_HOST
+            or EMAIL_HOST in {"localhost", "mail.example.com"}
+            or not DEFAULT_FROM_EMAIL
+        )
+    ):
+        configuration_errors.append(
+            "Configure the real SMTP host and DEFAULT_FROM_EMAIL."
+        )
+    if EMAIL_USE_TLS and EMAIL_USE_SSL:
+        configuration_errors.append(
+            "EMAIL_USE_TLS and EMAIL_USE_SSL cannot both be enabled."
+        )
+    if SEND_CONTACT_EMAILS and not ADMIN_EMAIL:
+        configuration_errors.append(
+            "ADMIN_EMAIL is required when SEND_CONTACT_EMAILS is enabled."
+        )
+    if not SECURE_SSL_REDIRECT:
+        configuration_errors.append("SECURE_SSL_REDIRECT must be enabled in production.")
+    if not SESSION_COOKIE_SECURE or not CSRF_COOKIE_SECURE:
+        configuration_errors.append(
+            "SESSION_COOKIE_SECURE and CSRF_COOKIE_SECURE must be enabled in production."
+        )
+    invalid_csrf_origins = [
+        origin
+        for origin in CSRF_TRUSTED_ORIGINS
+        if urlparse(origin).scheme != "https" and not _is_local_origin(origin)
+    ]
+    if invalid_csrf_origins:
+        configuration_errors.append(
+            "CSRF_TRUSTED_ORIGINS may contain only HTTPS production origins."
+        )
+    if LOG_LEVEL not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        configuration_errors.append(
+            "DJANGO_LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL."
+        )
+
+    if configuration_errors:
+        details = "\n - ".join(configuration_errors)
+        raise ImproperlyConfigured(f"Production configuration errors:\n - {details}")

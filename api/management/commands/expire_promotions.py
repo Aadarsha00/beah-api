@@ -20,7 +20,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        today = timezone.now().date()
+        today = timezone.localdate()
 
         # Find active promotions that have expired
         expired_promotions = Promotion.objects.filter(

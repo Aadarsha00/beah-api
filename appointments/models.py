@@ -78,7 +78,7 @@ class Appointment(models.Model):
         naive_value = timezone.datetime.combine(
             self.appointment_date, self.appointment_time
         )
-        return timezone.make_aware(naive_value, timezone.get_current_timezone())
+        return timezone.make_aware(naive_value, timezone.get_default_timezone())
 
     def can_cancel(self):
         return (

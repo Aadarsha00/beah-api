@@ -6,6 +6,7 @@ from django.utils import timezone
 from django.db.models import Q
 
 from .models import Promotion, ContactMessage, AdminNote
+from .throttles import ContactMessageCreateThrottle
 from .serializers import (
     PromotionSerializer,
     PromotionCreateUpdateSerializer,
@@ -29,28 +30,35 @@ class PromotionViewSet(viewsets.ModelViewSet):
     ordering_fields = ["start_date", "end_date", "created_at"]
     ordering = ["-start_date"]
 
+    def get_queryset(self):
+        queryset = Promotion.objects.prefetch_related("applicable_services")
+        if self.request.user.is_staff:
+            return queryset
+        today = timezone.localdate()
+        return queryset.filter(
+            is_active=True,
+            start_date__lte=today,
+            end_date__gte=today,
+        )
+
     def get_serializer_class(self):
         if self.action in ["create", "update", "partial_update"]:
             return PromotionCreateUpdateSerializer
         return PromotionSerializer
 
     def get_permissions(self):
-        if self.action in [
-            "create",
-            "update",
-            "partial_update",
-            "destroy",
-            "toggle_active",
-        ]:
-            return [permissions.IsAuthenticated(), permissions.IsAdminUser()]
-        return [permissions.AllowAny()]
+        if self.action in ["list", "retrieve", "active"]:
+            return [permissions.AllowAny()]
+        return [permissions.IsAdminUser()]
 
     @action(detail=False, methods=["get"])
     def active(self, request):
         """Get currently active promotions"""
-        today = timezone.now().date()
-        active_promotions = self.queryset.filter(
-            is_active=True, start_date__lte=today, end_date__gte=today
+        today = timezone.localdate()
+        active_promotions = self.get_queryset().filter(
+            is_active=True,
+            start_date__lte=today,
+            end_date__gte=today,
         )
         serializer = self.get_serializer(active_promotions, many=True)
         return Response(serializer.data)
@@ -58,7 +66,7 @@ class PromotionViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"])
     def upcoming(self, request):
         """Get upcoming promotions"""
-        today = timezone.now().date()
+        today = timezone.localdate()
         upcoming_promotions = self.queryset.filter(is_active=True, start_date__gt=today)
         serializer = self.get_serializer(upcoming_promotions, many=True)
         return Response(serializer.data)
@@ -66,7 +74,7 @@ class PromotionViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"])
     def expired(self, request):
         """Get expired promotions"""
-        today = timezone.now().date()
+        today = timezone.localdate()
         expired_promotions = self.queryset.filter(end_date__lt=today)
         serializer = self.get_serializer(expired_promotions, many=True)
         return Response(serializer.data)
@@ -92,6 +100,11 @@ class ContactMessageViewSet(viewsets.ModelViewSet):
     search_fields = ["name", "email", "subject", "message"]
     ordering_fields = ["created_at"]
     ordering = ["-created_at"]
+
+    def get_throttles(self):
+        if self.action == "create":
+            return [ContactMessageCreateThrottle()]
+        return super().get_throttles()
 
     def get_serializer_class(self):
         if self.action == "create":

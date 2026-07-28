@@ -1,5 +1,12 @@
 from django.db import migrations
 
+# CUTOVER WARNING:
+# This historical migration must run only while a newly migrated target contains
+# no users. Applying it to a populated legacy database activates every inactive
+# non-staff account, including accounts that may have been deliberately disabled.
+# The lossless cutover restores users only after migrations and preserves each
+# source is_active value exactly. See DEPLOYMENT.md.
+
 
 def activate_legacy_users(apps, schema_editor):
     User = apps.get_model("accounts", "User")

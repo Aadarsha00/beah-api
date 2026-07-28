@@ -31,7 +31,7 @@ class Promotion(models.Model):
         return self.title
 
     def is_currently_active(self):
-        today = timezone.now().date()
+        today = timezone.localdate()
         return (
             self.is_active
             and self.start_date is not None

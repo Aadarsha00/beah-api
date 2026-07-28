@@ -5,13 +5,20 @@ from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 from django.db import transaction
+from django.db.models import Q
 from .models import Appointment
 from .serializers import (
     AppointmentSerializer,
     AppointmentCreateSerializer,
     AppointmentUpdateSerializer,
 )
-from .booking import MAX_ADVANCE_DAYS, available_slots
+from .booking import (
+    MAX_ADVANCE_DAYS,
+    available_slots,
+    booking_now,
+    booking_timezone,
+    booking_today,
+)
 from services.models import Service
 from api.permissions import IsOwnerOrAdmin
 
@@ -161,7 +168,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        today = timezone.localdate()
+        today = booking_today()
         if not today <= appointment_date <= today + timedelta(days=MAX_ADVANCE_DAYS):
             return Response(
                 {
@@ -185,6 +192,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 "date": appointment_date,
                 "service": service.pk,
                 "duration_minutes": service.duration_minutes,
+                "time_zone": str(booking_timezone()),
                 "slots": available_slots(
                     appointment_date, service.duration_minutes
                 ),
@@ -194,10 +202,15 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"])
     def my_upcoming(self, request):
         """Get user's upcoming appointments"""
+        current_time = booking_now()
+        today = current_time.date()
+        local_time = current_time.time().replace(tzinfo=None)
         upcoming_appointments = Appointment.objects.filter(
             client=request.user,
-            appointment_date__gte=timezone.now().date(),
             status__in=["booked", "confirmed"],
+        ).filter(
+            Q(appointment_date__gt=today)
+            | Q(appointment_date=today, appointment_time__gt=local_time)
         ).order_by("appointment_date", "appointment_time")
 
         serializer = self.get_serializer(upcoming_appointments, many=True)
@@ -206,7 +219,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"])
     def today(self, request):
         appointments = self.get_queryset().filter(
-            appointment_date=timezone.localdate()
+            appointment_date=booking_today()
         )
         page = self.paginate_queryset(appointments)
         serializer = self.get_serializer(page, many=True)
