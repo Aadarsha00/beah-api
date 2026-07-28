@@ -35,7 +35,13 @@ class PromotionViewSet(viewsets.ModelViewSet):
         return PromotionSerializer
 
     def get_permissions(self):
-        if self.action in ["create", "update", "partial_update", "destroy"]:
+        if self.action in [
+            "create",
+            "update",
+            "partial_update",
+            "destroy",
+            "toggle_active",
+        ]:
             return [permissions.IsAuthenticated(), permissions.IsAdminUser()]
         return [permissions.AllowAny()]
 

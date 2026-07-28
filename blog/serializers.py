@@ -31,6 +31,7 @@ class BlogPostSerializer(serializers.ModelSerializer):
         read_only_fields = (
             "id",
             "slug",
+            "author",
             "views_count",
             "created_at",
             "updated_at",
@@ -44,6 +45,11 @@ class BlogPostSerializer(serializers.ModelSerializer):
                 return request.build_absolute_uri(obj.featured_image.url)
             return obj.featured_image.url
         return None
+
+    def validate_featured_image(self, value):
+        if value and value.size > 5 * 1024 * 1024:
+            raise serializers.ValidationError("Images must be 5 MB or smaller.")
+        return value
 
 
 class BlogPostListSerializer(serializers.ModelSerializer):
@@ -71,4 +77,5 @@ class BlogPostListSerializer(serializers.ModelSerializer):
             request = self.context.get("request")
             if request:
                 return request.build_absolute_uri(obj.featured_image.url)
-            return obj.fe
+            return obj.featured_image.url
+        return None

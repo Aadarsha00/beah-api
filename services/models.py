@@ -20,10 +20,6 @@ class Service(models.Model):
     category = models.CharField(max_length=20, choices=SERVICE_CATEGORIES)
     duration_minutes = models.PositiveIntegerField(default=30)
     is_active = models.BooleanField(default=True)
-    requires_deposit = models.BooleanField(default=False)
-    deposit_amount = models.DecimalField(
-        max_digits=6, decimal_places=2, default=Decimal("0.00")
-    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

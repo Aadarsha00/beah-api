@@ -1,4 +1,4 @@
-from rest_framework import viewsets, permissions
+from rest_framework import filters, viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
@@ -9,24 +9,28 @@ from .serializers import GalleryImageSerializer, GalleryImageListSerializer
 class GalleryImageViewSet(viewsets.ModelViewSet):
     queryset = GalleryImage.objects.all()
     serializer_class = GalleryImageSerializer
-    filter_backends = [DjangoFilterBackend]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ["category", "is_featured", "is_active"]
+    search_fields = ["caption", "category"]
 
     def get_permissions(self):
         """Public read access, admin only for write operations"""
-        if self.action in ["list", "retrieve"]:
+        if self.action in ["list", "retrieve", "featured", "by_category"]:
             permission_classes = [permissions.AllowAny]
         else:
             permission_classes = [permissions.IsAdminUser]
         return [permission() for permission in permission_classes]
 
     def get_serializer_class(self):
-        if self.action == "list":
+        if self.action == "list" and not self.request.user.is_staff:
             return GalleryImageListSerializer
         return GalleryImageSerializer
 
     def get_queryset(self):
-        if self.action in ["list", "retrieve"] and not self.request.user.is_staff:
+        if (
+            self.action in ["list", "retrieve", "featured", "by_category"]
+            and not self.request.user.is_staff
+        ):
             return GalleryImage.objects.filter(is_active=True)
         return GalleryImage.objects.all()
 

@@ -10,9 +10,8 @@ class ServiceAdmin(admin.ModelAdmin):
         "price",
         "duration_minutes",
         "is_active",
-        "requires_deposit",
     )
-    list_filter = ("category", "is_active", "requires_deposit")
+    list_filter = ("category", "is_active")
     search_fields = ("name", "description")
-    list_editable = ("price", "is_active", "requires_deposit")
+    list_editable = ("price", "is_active")
     ordering = ("category", "name")

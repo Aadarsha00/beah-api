@@ -1,4 +1,4 @@
-from rest_framework import viewsets, permissions
+from rest_framework import filters, viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
@@ -10,25 +10,44 @@ from .serializers import BlogPostSerializer, BlogPostListSerializer
 class BlogPostViewSet(viewsets.ModelViewSet):
     queryset = BlogPost.objects.all()
     serializer_class = BlogPostSerializer
-    filter_backends = [DjangoFilterBackend]
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+        filters.OrderingFilter,
+    ]
     filterset_fields = ["category", "is_published", "is_featured"]
+    search_fields = ["title", "excerpt", "content", "meta_description"]
+    ordering_fields = ["created_at", "title", "published_at"]
     lookup_field = "slug"
 
     def get_permissions(self):
         """Public read access, admin only for write operations"""
-        if self.action in ["list", "retrieve"]:
+        if self.action in [
+            "list",
+            "retrieve",
+            "featured",
+            "by_category",
+            "recent",
+        ]:
             permission_classes = [permissions.AllowAny]
         else:
             permission_classes = [permissions.IsAdminUser]
         return [permission() for permission in permission_classes]
 
     def get_serializer_class(self):
-        if self.action == "list":
+        if self.action == "list" and not self.request.user.is_staff:
             return BlogPostListSerializer
         return BlogPostSerializer
 
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
+
     def get_queryset(self):
-        if self.action in ["list", "retrieve"] and not self.request.user.is_staff:
+        if (
+            self.action
+            in ["list", "retrieve", "featured", "by_category", "recent"]
+            and not self.request.user.is_staff
+        ):
             return BlogPost.objects.filter(is_published=True)
         return BlogPost.objects.all()
 

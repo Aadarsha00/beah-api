@@ -13,6 +13,7 @@ db.sqlite3
 /static/
 /.env
 .env.*
+!.env.example
 *.log
 
 # VS Code
@@ -25,7 +26,6 @@ Thumbs.db
 # Migrations
 **/migrations/*.pyc
 **/migrations/__pycache__/
-**/migrations/*.py
 
 # Pipenv/Poetry
 Pipfile.lock

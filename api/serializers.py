@@ -118,7 +118,7 @@ class ContactMessageUpdateSerializer(serializers.ModelSerializer):
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["id", "username", "email", "first_name", "last_name"]
+        fields = ["id", "email", "first_name", "last_name"]
 
 
 class AdminNoteSerializer(serializers.ModelSerializer):
@@ -140,7 +140,7 @@ class AdminNoteSerializer(serializers.ModelSerializer):
         read_only_fields = ["created_at", "updated_at", "created_by"]
 
     def get_created_by_name(self, obj):
-        return obj.created_by.get_full_name() or obj.created_by.username
+        return obj.created_by.get_full_name() or obj.created_by.email
 
 
 class AdminNoteCreateUpdateSerializer(serializers.ModelSerializer):

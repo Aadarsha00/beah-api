@@ -41,7 +41,14 @@ class BlogPost(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.slug:
-            self.slug = slugify(self.title)
+            base_slug = slugify(self.title) or "post"
+            candidate = base_slug
+            suffix = 2
+            existing = BlogPost.objects.exclude(pk=self.pk)
+            while existing.filter(slug=candidate).exists():
+                candidate = f"{base_slug}-{suffix}"
+                suffix += 1
+            self.slug = candidate
 
         # Auto-generate excerpt if not provided
         if not self.excerpt and self.content:
@@ -58,4 +65,4 @@ class BlogPost(models.Model):
         super().save(*args, **kwargs)
 
     def get_absolute_url(self):
-        return reverse("blog:post-detail", kwargs={"slug": self.slug})
+        return reverse("blogpost-detail", kwargs={"slug": self.slug})

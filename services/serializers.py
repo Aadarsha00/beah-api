@@ -13,8 +13,6 @@ class ServiceSerializer(serializers.ModelSerializer):
             "category",
             "duration_minutes",
             "is_active",
-            "requires_deposit",
-            "deposit_amount",
             "created_at",
             "updated_at",
         ]
@@ -32,6 +30,4 @@ class ServiceListSerializer(serializers.ModelSerializer):
             "price",
             "category",
             "duration_minutes",
-            "requires_deposit",
-            "deposit_amount",
         ]

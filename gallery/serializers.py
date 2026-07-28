@@ -29,6 +29,11 @@ class GalleryImageSerializer(serializers.ModelSerializer):
             return obj.image.url
         return None
 
+    def validate_image(self, value):
+        if value.size > 5 * 1024 * 1024:
+            raise serializers.ValidationError("Images must be 5 MB or smaller.")
+        return value
+
 
 class GalleryImageListSerializer(serializers.ModelSerializer):
     """Simplified serializer for listing gallery images"""

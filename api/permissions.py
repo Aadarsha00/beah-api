@@ -32,12 +32,17 @@ class IsOwnerOrAdmin(permissions.BasePermission):
     Custom permission to allow access to owners or admin users.
     """
 
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated)
+
     def has_object_permission(self, request, view, obj):
         # Admin users have full access
         if request.user and request.user.is_staff:
             return True
 
         # Owners have full access to their own objects
+        if hasattr(obj, "client"):
+            return obj.client == request.user
         if hasattr(obj, "created_by"):
             return obj.created_by == request.user
 

@@ -1,16 +1,18 @@
 from rest_framework import viewsets, permissions, status
+from datetime import timedelta
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 from django.db import transaction
-from decimal import Decimal
 from .models import Appointment
 from .serializers import (
     AppointmentSerializer,
     AppointmentCreateSerializer,
-    AppointmentPaymentSummarySerializer,
+    AppointmentUpdateSerializer,
 )
+from .booking import MAX_ADVANCE_DAYS, available_slots
+from services.models import Service
 from api.permissions import IsOwnerOrAdmin
 
 
@@ -18,20 +20,20 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     queryset = Appointment.objects.all()
     serializer_class = AppointmentSerializer
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = [
-        "status",
-        "payment_status",
-        "appointment_date",
-        "service",
-        "stylist",
-    ]
+    filterset_fields = {
+        "status": ["exact"],
+        "appointment_date": ["exact", "gte", "lte"],
+        "service": ["exact"],
+    }
 
     def get_permissions(self):
-        if self.action == "create":
+        if self.action == "availability":
             permission_classes = [permissions.AllowAny]
-        elif self.action in ["list", "retrieve", "payment_summary"]:
+        elif self.action in ["create", "list", "retrieve", "my_upcoming"]:
             permission_classes = [permissions.IsAuthenticated]
-        elif self.action in ["confirm", "mark_completed", "mark_no_show"]:
+        elif self.action in ["confirm", "mark_completed", "mark_no_show", "today"]:
+            permission_classes = [permissions.IsAdminUser]
+        elif self.action == "destroy":
             permission_classes = [permissions.IsAdminUser]
         else:
             permission_classes = [IsOwnerOrAdmin]
@@ -40,63 +42,59 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     def get_serializer_class(self):
         if self.action == "create":
             return AppointmentCreateSerializer
-        elif self.action == "payment_summary":
-            return AppointmentPaymentSummarySerializer
+        if self.action in ["update", "partial_update"]:
+            return AppointmentUpdateSerializer
         return AppointmentSerializer
 
     def get_queryset(self):
+        queryset = Appointment.objects.select_related("service", "stylist", "client")
         if self.request.user.is_staff:
-            return Appointment.objects.all()
+            return queryset
         elif self.request.user.is_authenticated:
-            return Appointment.objects.filter(client=self.request.user)
+            return queryset.filter(client=self.request.user)
         return Appointment.objects.none()
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
-        """Cancel an appointment with appropriate status based on timing"""
-        appointment = self.get_object()
-
         with transaction.atomic():
-            if not appointment.can_cancel():
-                appointment.status = "late_cancelled"
-                appointment.save()
-
-                # Handle refund logic for late cancellation
-                if appointment.can_be_refunded():
-                    # You might want to apply a cancellation fee here
-                    # and process partial refund
-                    pass
-
-                return Response(
-                    {
-                        "message": "Appointment cancelled with late cancellation policy applied.",
-                        "status": "late_cancelled",
-                        "refund_eligible": appointment.can_be_refunded(),
-                    },
-                    status=status.HTTP_200_OK,
-                )
-
-            appointment.status = "cancelled"
-            appointment.save()
-
-            return Response(
-                {
-                    "message": "Appointment cancelled successfully.",
-                    "status": "cancelled",
-                    "refund_eligible": appointment.can_be_refunded(),
-                },
-                status=status.HTTP_200_OK,
+            appointment = Appointment.objects.select_for_update().get(
+                pk=self.get_object().pk
             )
+            if appointment.status not in {"booked", "confirmed"}:
+                return Response(
+                    {"detail": "Only active appointments can be cancelled."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if appointment.is_past_due():
+                return Response(
+                    {"detail": "Past appointments cannot be cancelled."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            appointment.status = (
+                "cancelled" if appointment.can_cancel() else "late_cancelled"
+            )
+            appointment.save(update_fields=["status", "updated_at"])
+
+        return Response(
+            {
+                "message": "Appointment cancelled successfully.",
+                "status": appointment.status,
+            }
+        )
 
     @action(detail=True, methods=["post"], permission_classes=[permissions.IsAdminUser])
     def confirm(self, request, pk=None):
         """Confirm an appointment (admin only)"""
         appointment = self.get_object()
 
-        # Check if deposit is required and paid
-        if appointment.service.requires_deposit and not appointment.has_deposit_paid():
+        if appointment.status != "booked":
             return Response(
-                {"error": "Cannot confirm appointment: deposit not paid."},
+                {"detail": "Only booked appointments can be confirmed."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if appointment.is_past_due():
+            return Response(
+                {"detail": "Past appointments cannot be confirmed."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -112,11 +110,9 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         """Mark appointment as completed"""
         appointment = self.get_object()
 
-        if appointment.status not in ["confirmed", "booked"]:
+        if appointment.status != "confirmed" or not appointment.is_past_due():
             return Response(
-                {
-                    "error": "Only confirmed or booked appointments can be marked as completed."
-                },
+                {"detail": "Only past, confirmed appointments can be completed."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -132,9 +128,9 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         """Mark appointment as no show"""
         appointment = self.get_object()
 
-        if not appointment.is_past_due():
+        if appointment.status not in {"booked", "confirmed"} or not appointment.is_past_due():
             return Response(
-                {"error": "Cannot mark as no show: appointment time has not passed."},
+                {"detail": "Only past, active appointments can be marked as no-show."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -145,42 +141,59 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             {"message": "Appointment marked as no show."}, status=status.HTTP_200_OK
         )
 
-    @action(detail=True, methods=["get"])
-    def payment_summary(self, request, pk=None):
-        """Get payment summary for an appointment"""
-        appointment = self.get_object()
+    @action(detail=False, methods=["get"])
+    def availability(self, request):
+        date_value = request.query_params.get("date")
+        service_id = request.query_params.get("service")
+        if not date_value or not service_id:
+            return Response(
+                {"detail": "Both date and service query parameters are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            appointment_date = timezone.datetime.strptime(
+                date_value, "%Y-%m-%d"
+            ).date()
+            service_pk = int(service_id)
+        except ValueError:
+            return Response(
+                {"detail": "Use a valid service ID and a date in YYYY-MM-DD format."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        return Response(appointment.payment_summary, status=status.HTTP_200_OK)
+        today = timezone.localdate()
+        if not today <= appointment_date <= today + timedelta(days=MAX_ADVANCE_DAYS):
+            return Response(
+                {
+                    "detail": (
+                        f"Choose a date from today through {MAX_ADVANCE_DAYS} days ahead."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-    @action(detail=True, methods=["get"])
-    def check_payment_status(self, request, pk=None):
-        """Check if appointment payments are up to date"""
-        appointment = self.get_object()
+        try:
+            service = Service.objects.get(pk=service_pk, is_active=True)
+        except Service.DoesNotExist:
+            return Response(
+                {"detail": "Service not found or inactive."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
-        payment_info = {
-            "appointment_id": appointment.id,
-            "total_amount": appointment.total_amount,
-            "deposit_required": appointment.deposit_amount > 0,
-            "deposit_amount": appointment.deposit_amount,
-            "deposit_paid": appointment.has_deposit_paid(),
-            "total_paid": appointment.get_total_paid(),
-            "remaining_balance": appointment.get_remaining_balance(),
-            "is_fully_paid": appointment.is_fully_paid(),
-            "payment_status": appointment.payment_status,
-            "can_be_refunded": appointment.can_be_refunded(),
-        }
-
-        return Response(payment_info, status=status.HTTP_200_OK)
+        return Response(
+            {
+                "date": appointment_date,
+                "service": service.pk,
+                "duration_minutes": service.duration_minutes,
+                "slots": available_slots(
+                    appointment_date, service.duration_minutes
+                ),
+            }
+        )
 
     @action(detail=False, methods=["get"])
     def my_upcoming(self, request):
         """Get user's upcoming appointments"""
-        if not request.user.is_authenticated:
-            return Response(
-                {"error": "Authentication required"},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
-
         upcoming_appointments = Appointment.objects.filter(
             client=request.user,
             appointment_date__gte=timezone.now().date(),
@@ -191,19 +204,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"])
-    def payment_pending(self, request):
-        """Get appointments with pending payments"""
-        if not request.user.is_authenticated:
-            return Response(
-                {"error": "Authentication required"},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
-
-        pending_appointments = Appointment.objects.filter(
-            client=request.user,
-            payment_status__in=["pending", "deposit_paid"],
-            status__in=["booked", "confirmed"],
-        ).order_by("appointment_date", "appointment_time")
-
-        serializer = self.get_serializer(pending_appointments, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+    def today(self, request):
+        appointments = self.get_queryset().filter(
+            appointment_date=timezone.localdate()
+        )
+        page = self.paginate_queryset(appointments)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
