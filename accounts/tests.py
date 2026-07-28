@@ -1,4 +1,7 @@
+import re
+
 from django.contrib.auth import get_user_model
+from django.core import mail
 from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -8,7 +11,7 @@ User = get_user_model()
 
 
 class RegistrationTests(TestCase):
-    def test_registration_accepts_profile_fields_and_activates_user(self):
+    def test_registration_sends_activation_email_before_login(self):
         response = APIClient().post(
             "/api/auth/users/",
             {
@@ -23,8 +26,58 @@ class RegistrationTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         user = User.objects.get(email="new@example.com")
-        self.assertTrue(user.is_active)
+        self.assertFalse(user.is_active)
         self.assertEqual(user.phone_number, "+14105550123")
+        self.assertEqual(len(mail.outbox), 1)
+
+        activation_email = mail.outbox[0]
+        self.assertEqual(activation_email.to, ["new@example.com"])
+        activation_match = re.search(
+            r"https://beautifulbrowsandhenna\.com/activate/([^/\s]+)/([^/\s<]+)",
+            activation_email.body,
+        )
+        self.assertIsNotNone(activation_match)
+
+        mail.outbox.clear()
+        resend_response = APIClient().post(
+            "/api/auth/users/resend_activation/",
+            {"email": "new@example.com"},
+        )
+        self.assertEqual(resend_response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(len(mail.outbox), 1)
+
+        login_before_activation = APIClient().post(
+            "/api/auth/jwt/create/",
+            {
+                "email": "new@example.com",
+                "password": "a-strong-test-password",
+            },
+        )
+        self.assertEqual(
+            login_before_activation.status_code, status.HTTP_401_UNAUTHORIZED
+        )
+
+        uid, token = activation_match.groups()
+        activation_response = APIClient().post(
+            "/api/auth/users/activation/",
+            {"uid": uid, "token": token},
+        )
+        self.assertEqual(
+            activation_response.status_code, status.HTTP_204_NO_CONTENT
+        )
+
+        user.refresh_from_db()
+        self.assertTrue(user.is_active)
+
+        login_after_activation = APIClient().post(
+            "/api/auth/jwt/create/",
+            {
+                "email": "new@example.com",
+                "password": "a-strong-test-password",
+            },
+        )
+        self.assertEqual(login_after_activation.status_code, status.HTTP_200_OK)
+        self.assertIn("access", login_after_activation.data)
 
     def test_normal_user_does_not_have_arbitrary_permissions(self):
         user = User.objects.create_user(

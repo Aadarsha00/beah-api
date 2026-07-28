@@ -163,8 +163,16 @@ DJOSER = {
     "LOGIN_FIELD": "email",
     "USER_CREATE_PASSWORD_RETYPE": True,
     "SET_PASSWORD_RETYPE": True,
-    "SEND_ACTIVATION_EMAIL": False,
+    "ACTIVATION_URL": "activate/{uid}/{token}",
+    "SEND_ACTIVATION_EMAIL": env_bool("SEND_ACTIVATION_EMAIL", True),
     "SEND_CONFIRMATION_EMAIL": False,
+    "EMAIL_FRONTEND_DOMAIN": os.getenv(
+        "EMAIL_FRONTEND_DOMAIN", "beautifulbrowsandhenna.com"
+    ),
+    "EMAIL_FRONTEND_PROTOCOL": os.getenv("EMAIL_FRONTEND_PROTOCOL", "https"),
+    "EMAIL_FRONTEND_SITE_NAME": os.getenv(
+        "EMAIL_FRONTEND_SITE_NAME", "Beautiful Brows & Henna"
+    ),
     "PASSWORD_RESET_CONFIRM_URL": "password/reset/confirm/{uid}/{token}",
     "SERIALIZERS": {
         "user_create": "accounts.serializers.UserCreateSerializer",
@@ -187,6 +195,16 @@ CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS")
 
 EMAIL_BACKEND = os.getenv(
     "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"
+)
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", True)
+EMAIL_USE_SSL = env_bool("EMAIL_USE_SSL", False)
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "15"))
+DEFAULT_FROM_EMAIL = os.getenv(
+    "DEFAULT_FROM_EMAIL", "Beautiful Brows & Henna <no-reply@beautifulbrowsandhenna.com>"
 )
 
 SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", not DEBUG)
