@@ -13,7 +13,7 @@ db.sqlite3
 /static/
 /.env
 .env.*
-!.env.example
+.env.example
 *.log
 
 # VS Code
@@ -46,3 +46,8 @@ htmlcov/
 local_settings.py
 
 tmp/
+
+# Confidential production cutover archives
+/cutover-bundles/
+*.cutover.zip
+*.cutover.zip.*.partial
