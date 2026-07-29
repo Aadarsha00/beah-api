@@ -11,9 +11,11 @@ db.sqlite3
 /media/
 /staticfiles/
 /static/
+# Real environment files stay local. The .env.example template is tracked on
+# purpose: it is the only record of what a deployment has to configure.
 /.env
 .env.*
-.env.example
+!.env.example
 *.log
 
 # VS Code

@@ -1,6 +1,7 @@
 from rest_framework import serializers
-from .models import Appointment
+from .models import Appointment, SalonClosure
 from .booking import (
+    ACTIVE_STATUSES,
     ensure_slot_available,
     reserve_appointment,
     reschedule_appointment,
@@ -119,3 +120,37 @@ class AppointmentUpdateSerializer(serializers.ModelSerializer):
         instance.notes = validated_data.get("notes", instance.notes)
         instance.save(update_fields=["notes", "updated_at"])
         return instance
+
+
+class SalonClosureSerializer(serializers.ModelSerializer):
+    affected_appointments = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SalonClosure
+        fields = [
+            "id",
+            "start_date",
+            "end_date",
+            "reason",
+            "affected_appointments",
+            "created_at",
+        ]
+        read_only_fields = ["created_at"]
+
+    def get_affected_appointments(self, obj):
+        """Closing a day does not cancel anything, so staff need this count."""
+        return Appointment.objects.filter(
+            appointment_date__range=(obj.start_date, obj.end_date),
+            status__in=ACTIVE_STATUSES,
+        ).count()
+
+    def validate(self, data):
+        start_date = data.get(
+            "start_date", getattr(self.instance, "start_date", None)
+        )
+        end_date = data.get("end_date", getattr(self.instance, "end_date", None))
+        if start_date and end_date and end_date < start_date:
+            raise serializers.ValidationError(
+                {"end_date": "End date cannot be before the start date."}
+            )
+        return data

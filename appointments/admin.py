@@ -1,6 +1,7 @@
 from django.contrib import admin
 
-from .models import Appointment
+from .booking import ACTIVE_STATUSES
+from .models import Appointment, SalonClosure
 
 
 @admin.register(Appointment)
@@ -46,3 +47,18 @@ class AppointmentAdmin(admin.ModelAdmin):
             status="cancelled"
         )
         self.message_user(request, f"Cancelled {count} appointment(s).")
+
+
+@admin.register(SalonClosure)
+class SalonClosureAdmin(admin.ModelAdmin):
+    list_display = ("start_date", "end_date", "reason", "existing_bookings")
+    search_fields = ("reason",)
+    ordering = ("-start_date",)
+
+    @admin.display(description="Bookings already in range")
+    def existing_bookings(self, obj):
+        """Closures do not cancel anything, so surface who still needs calling."""
+        return Appointment.objects.filter(
+            appointment_date__range=(obj.start_date, obj.end_date),
+            status__in=ACTIVE_STATUSES,
+        ).count()

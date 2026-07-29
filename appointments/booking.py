@@ -4,7 +4,7 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import Appointment, BookingDayLock
+from .models import Appointment, BookingDayLock, SalonClosure
 
 OPENING_TIME = time(hour=9)
 CLOSING_TIME = time(hour=18)
@@ -13,6 +13,10 @@ SUNDAY_CLOSING_TIME = time(hour=16)
 SLOT_INTERVAL_MINUTES = 30
 MAX_ADVANCE_DAYS = 90
 ACTIVE_STATUSES = ("booked", "confirmed")
+
+# Distinguishes "no closure lookup has happened yet" from "already looked up and
+# the salon is open", so slot loops can reuse one query instead of one per slot.
+_CLOSURE_UNCHECKED = object()
 
 
 def booking_timezone():
@@ -46,12 +50,21 @@ def business_hours(appointment_date):
     return OPENING_TIME, CLOSING_TIME
 
 
+def closure_for(appointment_date):
+    """Return the closure covering a date, or None when the salon is open."""
+    return SalonClosure.objects.filter(
+        start_date__lte=appointment_date,
+        end_date__gte=appointment_date,
+    ).first()
+
+
 def validate_slot(
     appointment_date,
     appointment_time,
     duration_minutes,
     *,
     current_time=None,
+    closure=_CLOSURE_UNCHECKED,
 ):
     current_time = current_time or booking_now()
     today = current_time.date()
@@ -66,6 +79,13 @@ def validate_slot(
                     f"Appointments can be booked up to {MAX_ADVANCE_DAYS} days ahead."
                 )
             }
+        )
+
+    if closure is _CLOSURE_UNCHECKED:
+        closure = closure_for(appointment_date)
+    if closure is not None:
+        raise serializers.ValidationError(
+            {"appointment_date": closure.booking_message()}
         )
 
     opening_time, closing_time = business_hours(appointment_date)
@@ -99,11 +119,8 @@ def validate_slot(
         )
 
 
-def slot_is_available(
-    appointment_date, appointment_time, duration_minutes, exclude_id=None
-):
-    proposed_start = _as_datetime(appointment_date, appointment_time)
-    proposed_end = proposed_start + timedelta(minutes=duration_minutes)
+def busy_intervals(appointment_date, exclude_id=None):
+    """Return (start, end) pairs for every active appointment on a date."""
     appointments = Appointment.objects.filter(
         appointment_date=appointment_date,
         status__in=ACTIVE_STATUSES,
@@ -111,18 +128,36 @@ def slot_is_available(
     if exclude_id:
         appointments = appointments.exclude(pk=exclude_id)
 
-    for appointment in appointments.only(
-        "appointment_time", "duration_minutes"
-    ):
+    intervals = []
+    for appointment in appointments.only("appointment_time", "duration_minutes"):
         existing_start = _as_datetime(
             appointment_date, appointment.appointment_time
         )
-        existing_end = existing_start + timedelta(
-            minutes=appointment.duration_minutes
+        intervals.append(
+            (
+                existing_start,
+                existing_start + timedelta(minutes=appointment.duration_minutes),
+            )
         )
-        if existing_start < proposed_end and existing_end > proposed_start:
-            return False
-    return True
+    return intervals
+
+
+def slot_is_available(
+    appointment_date,
+    appointment_time,
+    duration_minutes,
+    exclude_id=None,
+    intervals=None,
+):
+    proposed_start = _as_datetime(appointment_date, appointment_time)
+    proposed_end = proposed_start + timedelta(minutes=duration_minutes)
+    if intervals is None:
+        intervals = busy_intervals(appointment_date, exclude_id)
+
+    return not any(
+        existing_start < proposed_end and existing_end > proposed_start
+        for existing_start, existing_end in intervals
+    )
 
 
 def ensure_slot_available(
@@ -179,11 +214,16 @@ def reschedule_appointment(instance, validated_data):
 
 
 def available_slots(appointment_date, duration_minutes):
+    if closure_for(appointment_date) is not None:
+        return []
+
     slots = []
     current_time = booking_now()
     opening_time, closing_time = business_hours(appointment_date)
     cursor = _as_datetime(appointment_date, opening_time)
     closing = _as_datetime(appointment_date, closing_time)
+    # Read the day's bookings once instead of re-querying for every slot.
+    intervals = busy_intervals(appointment_date)
 
     while cursor + timedelta(minutes=duration_minutes) <= closing:
         slot_time = cursor.time()
@@ -193,11 +233,14 @@ def available_slots(appointment_date, duration_minutes):
                 slot_time,
                 duration_minutes,
                 current_time=current_time,
+                closure=None,
             )
         except serializers.ValidationError:
             pass
         else:
-            if slot_is_available(appointment_date, slot_time, duration_minutes):
+            if slot_is_available(
+                appointment_date, slot_time, duration_minutes, intervals=intervals
+            ):
                 slots.append(
                     {
                         "value": slot_time.strftime("%H:%M:%S"),

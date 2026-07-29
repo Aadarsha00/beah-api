@@ -5,8 +5,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from django.core.exceptions import ImproperlyConfigured
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load BASE_DIR/.env when it exists. override=False means a real process
+# environment variable always wins, so cPanel or systemd configuration is never
+# silently replaced by a stale checked-out file.
+load_dotenv(BASE_DIR / ".env", override=False)
 
 
 def env_bool(name, default=False):
@@ -33,6 +39,14 @@ def env_int(name, default):
         return int(value)
     except ValueError as exc:
         raise ImproperlyConfigured(f"{name} must be an integer.") from exc
+
+
+def env_float(name, default):
+    value = os.getenv(name, str(default))
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"{name} must be a number.") from exc
 
 
 def env_json(name, default=None):
@@ -64,6 +78,24 @@ if not SECRET_KEY:
         raise ImproperlyConfigured("DJANGO_SECRET_KEY is required when DEBUG is false.")
 
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
+
+# Every production guard below is skipped while DEBUG is true, so a .env copied
+# from a developer machine onto a real host would silently disable all of them
+# and serve debug tracebacks publicly. A real hostname is the tell: refuse.
+if DEBUG:
+    _publicly_reachable_hosts = [
+        host
+        for host in ALLOWED_HOSTS
+        if host not in {"localhost", "127.0.0.1", "::1", "testserver"}
+    ]
+    if _publicly_reachable_hosts:
+        raise ImproperlyConfigured(
+            "DJANGO_DEBUG is true but DJANGO_ALLOWED_HOSTS contains "
+            f"{_publicly_reachable_hosts}. Refusing to start a debug server on "
+            "a real hostname: it would expose tracebacks and settings, and it "
+            "skips the HTTPS, database, and email checks below. "
+            "Set DJANGO_DEBUG=false."
+        )
 
 DJANGO_APPS = [
     "django.contrib.admin",
@@ -157,6 +189,33 @@ elif DB_ENGINE == "sqlite":
     }
 else:
     raise ImproperlyConfigured("DB_ENGINE must be either 'sqlite' or 'mysql'.")
+
+# DRF throttles keep their counters in the default cache. A per-process cache
+# silently multiplies every rate limit by the worker count and resets on each
+# restart, so production has to pick a shared backend on purpose.
+CACHE_URL = os.getenv("DJANGO_CACHE_URL", "").strip()
+CACHE_TABLE = os.getenv("DJANGO_CACHE_TABLE", "").strip()
+ALLOW_LOCAL_MEMORY_CACHE = env_bool("DJANGO_ALLOW_LOCAL_MEMORY_CACHE", False)
+
+if CACHE_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": CACHE_URL,
+        }
+    }
+elif CACHE_TABLE:
+    # Zero extra infrastructure: run `manage.py createcachetable` once.
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+            "LOCATION": CACHE_TABLE,
+        }
+    }
+else:
+    CACHES = {
+        "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
+    }
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -273,10 +332,13 @@ EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", True)
 EMAIL_USE_SSL = env_bool("EMAIL_USE_SSL", False)
 EMAIL_TIMEOUT = env_int("EMAIL_TIMEOUT", 15)
 DEFAULT_FROM_EMAIL = os.getenv(
-    "DEFAULT_FROM_EMAIL", "Beautiful Brows & Henna <no-reply@beautifulbrowsandhenna.com>"
+    "DEFAULT_FROM_EMAIL", "Beautiful Brows & Henna <beautifulbrowsandhenna@gmail.com>"
 )
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip()
 SEND_CONTACT_EMAILS = env_bool("SEND_CONTACT_EMAILS", not DEBUG)
+# Unhandled 500s are mailed here so a failed booking is noticed the same day
+# rather than sitting unread in a server log.
+ADMINS = [("Site owner", ADMIN_EMAIL)] if ADMIN_EMAIL else []
 
 SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", not DEBUG)
 SESSION_COOKIE_SECURE = env_bool("SESSION_COOKIE_SECURE", not DEBUG)
@@ -310,7 +372,14 @@ LOGGING = {
         "console": {
             "class": "logging.StreamHandler",
             "formatter": "standard",
-        }
+        },
+        "mail_admins": {
+            "class": "django.utils.log.AdminEmailHandler",
+            "level": "ERROR",
+            # Plain text only: the HTML report embeds local variables, which
+            # for this application means customer contact details.
+            "include_html": False,
+        },
     },
     "root": {
         "handlers": ["console"],
@@ -322,8 +391,34 @@ LOGGING = {
             "level": "WARNING",
             "propagate": False,
         },
+        "django.request": {
+            # WARNING keeps 4xx patterns visible in the console; the
+            # mail_admins handler's own ERROR level means only 500s are mailed.
+            "handlers": ["console", "mail_admins"],
+            "level": "WARNING",
+            "propagate": False,
+        },
     },
 }
+
+SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()
+if SENTRY_DSN:
+    try:
+        import sentry_sdk
+    except ImportError as exc:
+        raise ImproperlyConfigured(
+            "SENTRY_DSN is set but sentry-sdk is not installed. "
+            "Add it to requirements.txt or clear SENTRY_DSN."
+        ) from exc
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=os.getenv("SENTRY_ENVIRONMENT", "production"),
+        release=os.getenv("SENTRY_RELEASE") or None,
+        traces_sample_rate=env_float("SENTRY_TRACES_SAMPLE_RATE", 0.0),
+        # Customer names, emails, and phone numbers must not leave the server.
+        send_default_pii=False,
+    )
 
 
 def _is_local_origin(value):
@@ -424,6 +519,13 @@ if not DEBUG:
     if SEND_CONTACT_EMAILS and not ADMIN_EMAIL:
         configuration_errors.append(
             "ADMIN_EMAIL is required when SEND_CONTACT_EMAILS is enabled."
+        )
+    if not (CACHE_URL or CACHE_TABLE or ALLOW_LOCAL_MEMORY_CACHE):
+        configuration_errors.append(
+            "Throttle counters need a shared cache. Set DJANGO_CACHE_URL for "
+            "Redis, or DJANGO_CACHE_TABLE after running createcachetable, or "
+            "set DJANGO_ALLOW_LOCAL_MEMORY_CACHE=true to accept per-process "
+            "limits on a single-worker deployment."
         )
     if not SECURE_SSL_REDIRECT:
         configuration_errors.append("SECURE_SSL_REDIRECT must be enabled in production.")

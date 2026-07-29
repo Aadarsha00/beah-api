@@ -1,16 +1,27 @@
 import re
 
+from django.conf import settings as django_settings
 from django.contrib.auth import get_user_model
 from django.core import mail
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
 User = get_user_model()
 
+# The activation link is built from the deployment's frontend settings, which a
+# developer's local .env points at localhost. Pin them so this test asserts the
+# link format rather than whatever environment happens to be configured.
+PRODUCTION_FRONTEND_DJOSER = {
+    **django_settings.DJOSER,
+    "EMAIL_FRONTEND_DOMAIN": "beautifulbrowsandhenna.com",
+    "EMAIL_FRONTEND_PROTOCOL": "https",
+}
+
 
 class RegistrationTests(TestCase):
+    @override_settings(DJOSER=PRODUCTION_FRONTEND_DJOSER)
     def test_registration_sends_activation_email_before_login(self):
         response = APIClient().post(
             "/api/auth/users/",

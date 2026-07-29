@@ -1,3 +1,4 @@
+from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models
 from django.contrib.auth import get_user_model
@@ -14,6 +15,47 @@ class BookingDayLock(models.Model):
 
     def __str__(self):
         return f"Booking lock for {self.date}"
+
+
+class SalonClosure(models.Model):
+    """An inclusive date range on which the salon takes no appointments.
+
+    Closures only block new bookings and reschedules. Appointments already on
+    the books are left untouched so staff can contact those customers instead
+    of having bookings silently disappear.
+    """
+
+    start_date = models.DateField()
+    end_date = models.DateField()
+    reason = models.CharField(max_length=200, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["start_date"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(end_date__gte=models.F("start_date")),
+                name="salonclosure_end_date_not_before_start_date",
+            )
+        ]
+
+    def __str__(self):
+        if self.start_date == self.end_date:
+            span = self.start_date.isoformat()
+        else:
+            span = f"{self.start_date} to {self.end_date}"
+        return f"Closed {span} ({self.reason})" if self.reason else f"Closed {span}"
+
+    def clean(self):
+        if self.end_date and self.start_date and self.end_date < self.start_date:
+            raise ValidationError(
+                {"end_date": "End date cannot be before the start date."}
+            )
+
+    def booking_message(self):
+        if self.reason:
+            return f"The salon is closed on this date ({self.reason})."
+        return "The salon is closed on this date."
 
 
 class Appointment(models.Model):

@@ -67,10 +67,17 @@ python manage.py migrate --plan
 python manage.py migrate
 ```
 
-The application reads operating-system environment variables directly; it does
-not automatically load a `.env` file. Configure variables in the cPanel
-application environment (or securely export/source them before Passenger
-starts). Never place production secrets in the repository.
+Configuration comes from operating-system environment variables. A `.env` file
+in the application root is also loaded if present, but with `override=False`:
+a real environment variable always beats the file, so cPanel panel settings are
+never silently replaced by a stale upload. `.env` is gitignored; never commit
+it, and never place production secrets in the repository.
+
+Prefer panel/systemd variables for production and keep `.env` for local
+development. If you do upload a `.env`, confirm `DJANGO_DEBUG=false` in it —
+though startup now refuses to run with `DJANGO_DEBUG=true` while
+`DJANGO_ALLOWED_HOSTS` contains a non-local hostname, so this fails loudly
+rather than quietly serving debug tracebacks.
 
 `accounts.0003_activate_legacy_users` predates this cutover design. It is a
 no-op on the required fresh target because no users exist while migrations run.
@@ -142,8 +149,16 @@ and reconcile the delta under a written data-recovery plan.
 - Durable media storage configuration
 - Working SMTP and activation URL configuration
 - `SEND_CONTACT_EMAILS=true` and a monitored `ADMIN_EMAIL`
+- A shared throttle cache: `DJANGO_CACHE_URL` (Redis) or `DJANGO_CACHE_TABLE`
+  (after `manage.py createcachetable`). A single-worker deployment may instead
+  set `DJANGO_ALLOW_LOCAL_MEMORY_CACHE=true` to accept per-process limits.
 - Secure cookies and HTTPS redirect
 - `America/New_York` salon timezone
+
+Unhandled 500s are emailed to `ADMIN_EMAIL` through the configured SMTP host,
+so that mailbox must be monitored. Setting `SENTRY_DSN` additionally reports
+exceptions to Sentry and requires `pip install sentry-sdk`; it is deliberately
+not in `requirements.txt` because the email path needs no extra service.
 
 When TLS terminates at a trusted reverse proxy, enable
 `DJANGO_TRUST_X_FORWARDED_PROTO=true` only if that proxy strips untrusted
@@ -203,7 +218,12 @@ Deployment hardening does not alter these rules:
 - 30-minute slot boundaries
 - Maximum booking horizon: 90 days
 - One global appointment capacity at a time, despite the optional stylist field
-- No holiday/closure calendar
 
-Changing capacity, hours, closures, or per-stylist scheduling requires an
-explicit business decision and new booking tests.
+Holidays and time off are configurable: staff add date ranges under Closures in
+the dashboard (or `SalonClosure` in Django admin) and those dates stop accepting
+new bookings and reschedules. Closing a date deliberately does **not** cancel
+bookings that already exist in that range; the dashboard reports how many are
+affected so staff can contact those customers.
+
+Changing capacity, hours, or per-stylist scheduling requires an explicit
+business decision and new booking tests.

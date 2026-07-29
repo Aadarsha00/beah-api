@@ -1,0 +1,89 @@
+name: API CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Tests run on MySQL, not SQLite. SQLite silently ignores select_for_update,
+    # so the booking day lock would never actually execute there.
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root-password
+          MYSQL_DATABASE: beah_ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-root-password"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=15
+
+    env:
+      DB_ENGINE: mysql
+      DB_NAME: beah_ci
+      DB_USER: root
+      DB_PASSWORD: ci-root-password
+      DB_HOST: 127.0.0.1
+      DB_PORT: "3306"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install MySQL client headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config default-libmysqlclient-dev
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --requirement requirements.txt
+          python -m pip check
+
+      - name: Check for missing migrations
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Run tests
+        run: python manage.py test --verbosity 2
+
+      - name: Prove the double-booking lock actually ran
+        run: |
+          python manage.py test appointments.tests.ConcurrentBookingTests \
+            --verbosity 2 2>&1 | tee concurrency.log
+          if grep -q "skipped" concurrency.log; then
+            echo "::error::Concurrency tests were skipped, so row locking was never exercised."
+            exit 1
+          fi
+
+      - name: Verify production configuration
+        env:
+          DJANGO_DEBUG: "false"
+          DJANGO_ALLOWED_HOSTS: api.beautifulbrowsandhenna.com
+          CORS_ALLOWED_ORIGINS: https://beautifulbrowsandhenna.com
+          CSRF_TRUSTED_ORIGINS: https://beautifulbrowsandhenna.com
+          DJANGO_MEDIA_ROOT: /srv/beah-media
+          EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
+          EMAIL_HOST: smtp.ci-placeholder.invalid
+          EMAIL_HOST_USER: ci@ci-placeholder.invalid
+          EMAIL_HOST_PASSWORD: ci-placeholder
+          DEFAULT_FROM_EMAIL: Beautiful Brows & Henna <no-reply@beautifulbrowsandhenna.com>
+          ADMIN_EMAIL: owner@beautifulbrowsandhenna.com
+          DJANGO_CACHE_TABLE: django_cache
+        run: |
+          export DJANGO_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(64))')"
+          python manage.py check --deploy

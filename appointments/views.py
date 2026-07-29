@@ -6,11 +6,12 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 from django.db import transaction
 from django.db.models import Q
-from .models import Appointment
+from .models import Appointment, SalonClosure
 from .serializers import (
     AppointmentSerializer,
     AppointmentCreateSerializer,
     AppointmentUpdateSerializer,
+    SalonClosureSerializer,
 )
 from .booking import (
     MAX_ADVANCE_DAYS,
@@ -18,6 +19,7 @@ from .booking import (
     booking_now,
     booking_timezone,
     booking_today,
+    closure_for,
 )
 from services.models import Service
 from api.permissions import IsOwnerOrAdmin
@@ -92,21 +94,24 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], permission_classes=[permissions.IsAdminUser])
     def confirm(self, request, pk=None):
         """Confirm an appointment (admin only)"""
-        appointment = self.get_object()
-
-        if appointment.status != "booked":
-            return Response(
-                {"detail": "Only booked appointments can be confirmed."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if appointment.is_past_due():
-            return Response(
-                {"detail": "Past appointments cannot be confirmed."},
-                status=status.HTTP_400_BAD_REQUEST,
+        with transaction.atomic():
+            appointment = Appointment.objects.select_for_update().get(
+                pk=self.get_object().pk
             )
 
-        appointment.status = "confirmed"
-        appointment.save()
+            if appointment.status != "booked":
+                return Response(
+                    {"detail": "Only booked appointments can be confirmed."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if appointment.is_past_due():
+                return Response(
+                    {"detail": "Past appointments cannot be confirmed."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            appointment.status = "confirmed"
+            appointment.save(update_fields=["status", "updated_at"])
 
         return Response(
             {"message": "Appointment confirmed."}, status=status.HTTP_200_OK
@@ -115,16 +120,19 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], permission_classes=[permissions.IsAdminUser])
     def mark_completed(self, request, pk=None):
         """Mark appointment as completed"""
-        appointment = self.get_object()
-
-        if appointment.status != "confirmed" or not appointment.is_past_due():
-            return Response(
-                {"detail": "Only past, confirmed appointments can be completed."},
-                status=status.HTTP_400_BAD_REQUEST,
+        with transaction.atomic():
+            appointment = Appointment.objects.select_for_update().get(
+                pk=self.get_object().pk
             )
 
-        appointment.status = "completed"
-        appointment.save()
+            if appointment.status != "confirmed" or not appointment.is_past_due():
+                return Response(
+                    {"detail": "Only past, confirmed appointments can be completed."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            appointment.status = "completed"
+            appointment.save(update_fields=["status", "updated_at"])
 
         return Response(
             {"message": "Appointment marked as completed."}, status=status.HTTP_200_OK
@@ -133,16 +141,19 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], permission_classes=[permissions.IsAdminUser])
     def mark_no_show(self, request, pk=None):
         """Mark appointment as no show"""
-        appointment = self.get_object()
-
-        if appointment.status not in {"booked", "confirmed"} or not appointment.is_past_due():
-            return Response(
-                {"detail": "Only past, active appointments can be marked as no-show."},
-                status=status.HTTP_400_BAD_REQUEST,
+        with transaction.atomic():
+            appointment = Appointment.objects.select_for_update().get(
+                pk=self.get_object().pk
             )
 
-        appointment.status = "no_show"
-        appointment.save()
+            if appointment.status not in {"booked", "confirmed"} or not appointment.is_past_due():
+                return Response(
+                    {"detail": "Only past, active appointments can be marked as no-show."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            appointment.status = "no_show"
+            appointment.save(update_fields=["status", "updated_at"])
 
         return Response(
             {"message": "Appointment marked as no show."}, status=status.HTTP_200_OK
@@ -187,14 +198,20 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        closure = closure_for(appointment_date)
+
         return Response(
             {
                 "date": appointment_date,
                 "service": service.pk,
                 "duration_minutes": service.duration_minutes,
                 "time_zone": str(booking_timezone()),
-                "slots": available_slots(
-                    appointment_date, service.duration_minutes
+                "is_closed": closure is not None,
+                "closure_reason": closure.reason if closure else "",
+                "slots": (
+                    []
+                    if closure
+                    else available_slots(appointment_date, service.duration_minutes)
                 ),
             }
         )
@@ -222,5 +239,25 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             appointment_date=booking_today()
         )
         page = self.paginate_queryset(appointments)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+
+
+class SalonClosureViewSet(viewsets.ModelViewSet):
+    """Holiday and vacation calendar. Closed dates accept no new bookings."""
+
+    queryset = SalonClosure.objects.all()
+    serializer_class = SalonClosureSerializer
+    permission_classes = [permissions.IsAdminUser]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = {
+        "start_date": ["exact", "gte", "lte"],
+        "end_date": ["exact", "gte", "lte"],
+    }
+
+    @action(detail=False, methods=["get"])
+    def upcoming(self, request):
+        closures = self.get_queryset().filter(end_date__gte=booking_today())
+        page = self.paginate_queryset(closures)
         serializer = self.get_serializer(page, many=True)
         return self.get_paginated_response(serializer.data)
